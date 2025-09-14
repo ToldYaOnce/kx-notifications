@@ -6,46 +6,96 @@ import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
 // Environment variables
 const ASSUME_ROLE_ARN = process.env.ASSUME_ROLE_ARN;
 
-// AWS SDK clients
+// Initialize AWS SDK clients at module load time to avoid cold start delays
 let dynamoClient: DynamoDBClient;
 let docClient: DynamoDBDocumentClient;
 let stsClient: STSClient;
+let clientsInitialized = false;
+let initializationPromise: Promise<void> | null = null;
 
 // Connection management clients grouped by endpoint
 const managementClients = new Map<string, ApiGatewayManagementApiClient>();
 
+// Initialize clients immediately at module load
+if (!ASSUME_ROLE_ARN) {
+  // For default credentials, initialize synchronously at module load
+  dynamoClient = new DynamoDBClient({
+    maxAttempts: 3,
+  });
+  docClient = DynamoDBDocumentClient.from(dynamoClient, {
+    marshallOptions: {
+      removeUndefinedValues: true,
+    },
+  });
+  clientsInitialized = true;
+}
+
 /**
  * Initialize AWS SDK clients with optional cross-account role assumption
+ * This is now optimized to only run once and cache the result
  */
-export async function initializeClients() {
-  if (ASSUME_ROLE_ARN) {
+export async function initializeClients(): Promise<void> {
+  if (clientsInitialized) {
+    return;
+  }
+
+  if (initializationPromise) {
+    return initializationPromise;
+  }
+
+  initializationPromise = (async () => {
+    const startTime = Date.now();
     console.log(JSON.stringify({
       level: 'INFO',
-      message: 'Assuming cross-account role',
-      roleArn: ASSUME_ROLE_ARN,
+      message: 'Starting AWS client initialization',
+      timestamp: new Date().toISOString(),
     }));
-    
-    stsClient = new STSClient({});
-    
-    const assumeRoleResult = await stsClient.send(new AssumeRoleCommand({
-      RoleArn: ASSUME_ROLE_ARN,
-      RoleSessionName: 'kxgen-notifications-cross-account',
-      DurationSeconds: 3600, // 1 hour
+    if (ASSUME_ROLE_ARN) {
+      console.log(JSON.stringify({
+        level: 'INFO',
+        message: 'Assuming cross-account role',
+        roleArn: ASSUME_ROLE_ARN,
+      }));
+      
+      stsClient = new STSClient({
+        maxAttempts: 3,
+      });
+      
+      const assumeRoleResult = await stsClient.send(new AssumeRoleCommand({
+        RoleArn: ASSUME_ROLE_ARN,
+        RoleSessionName: 'kxgen-notifications-cross-account',
+        DurationSeconds: 3600, // 1 hour
+      }));
+      
+      const credentials = {
+        accessKeyId: assumeRoleResult.Credentials!.AccessKeyId!,
+        secretAccessKey: assumeRoleResult.Credentials!.SecretAccessKey!,
+        sessionToken: assumeRoleResult.Credentials!.SessionToken!,
+      };
+      
+      dynamoClient = new DynamoDBClient({ 
+        credentials,
+        maxAttempts: 3,
+      });
+      docClient = DynamoDBDocumentClient.from(dynamoClient, {
+        marshallOptions: {
+          removeUndefinedValues: true,
+        },
+      });
+    }
+
+    const endTime = Date.now();
+    console.log(JSON.stringify({
+      level: 'INFO',
+      message: 'AWS client initialization completed',
+      duration: `${endTime - startTime}ms`,
+      timestamp: new Date().toISOString(),
     }));
-    
-    const credentials = {
-      accessKeyId: assumeRoleResult.Credentials!.AccessKeyId!,
-      secretAccessKey: assumeRoleResult.Credentials!.SecretAccessKey!,
-      sessionToken: assumeRoleResult.Credentials!.SessionToken!,
-    };
-    
-    dynamoClient = new DynamoDBClient({ credentials });
-    docClient = DynamoDBDocumentClient.from(dynamoClient);
-  } else {
-    // Use default credentials
-    dynamoClient = new DynamoDBClient({});
-    docClient = DynamoDBDocumentClient.from(dynamoClient);
-  }
+
+    clientsInitialized = true;
+  })();
+
+  return initializationPromise;
 }
 
 /**
@@ -60,12 +110,16 @@ export function getDocClient(): DynamoDBDocumentClient {
 
 /**
  * Get or create ApiGatewayManagementApiClient for a specific endpoint
+ * Optimized to reuse clients and avoid cold start delays
  */
 export function getManagementClient(domainName: string, stage: string): ApiGatewayManagementApiClient {
   const endpoint = `https://${domainName}/${stage}`;
   
   if (!managementClients.has(endpoint)) {
-    const clientConfig: any = { endpoint };
+    const clientConfig: any = { 
+      endpoint,
+      maxAttempts: 3,
+    };
     
     // Use assumed role credentials if available
     if (ASSUME_ROLE_ARN && dynamoClient?.config.credentials) {
@@ -77,6 +131,7 @@ export function getManagementClient(domainName: string, stage: string): ApiGatew
   
   return managementClients.get(endpoint)!;
 }
+
 
 
 

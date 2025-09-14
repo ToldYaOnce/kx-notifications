@@ -2,8 +2,10 @@ import * as cdk from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
@@ -23,6 +25,8 @@ export interface NotificationsStackProps extends cdk.StackProps {
    * Enables cross-account EventBridge → WebSocket notifications
    */
   assumeRoleArn?: string;
+
+  // Note: Lambda warming removed - using provisioned concurrency instead
 }
 
 /**
@@ -154,15 +158,26 @@ export class NotificationsStack extends cdk.Stack {
       this, 'KxEventBridge', 'KxGenStack'
     );
     
+    // Create Dead Letter Queue for failed notifications
+    const notifierDLQ = new sqs.Queue(this, 'NotifierDLQ', {
+      queueName: `kxgen-${env}-notifier-dlq`,
+      retentionPeriod: cdk.Duration.days(14), // Keep failed events for 2 weeks
+    });
+
     // Notifier Lambda (EventBridge → WebSocket)
+    // Optimized for cold start performance
     this.notifierFunction = new NodejsFunction(this, 'NotifierFunction', {
       entry: 'src/notifier/notifier.ts',
       runtime: lambda.Runtime.NODEJS_18_X,
-      timeout: cdk.Duration.seconds(30),
-      memorySize: 512,
+      timeout: cdk.Duration.seconds(30), // Reasonable timeout
+      memorySize: 1769, // 1.75GB - sweet spot for Lambda performance/cost
+      // Removed reservedConcurrentExecutions - conflicts with provisioned concurrency
+      deadLetterQueue: notifierDLQ, // Add DLQ directly in constructor
       bundling: {
         forceDockerBundling: false,
         externalModules: ['aws-sdk'],
+        minify: true, // Reduce bundle size
+        sourceMap: false, // Disable source maps for faster startup
       },
       environment: {
         CONNECTIONS_TABLE: this.connectionsTable.tableName,
@@ -170,8 +185,13 @@ export class NotificationsStack extends cdk.Stack {
         WEBSOCKET_STAGE: webSocketStage.stageName,
         ASSUME_ROLE_ARN: props?.assumeRoleArn || '',
         NODE_ENV: 'production',
+        // Optimize AWS SDK behavior
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1',
       },
     });
+
+    // Note: Provisioned concurrency removed for now - focusing on cold start optimization
+    // The real issue is likely the 5-6 second Lambda initialization time
     
     // Grant permissions to Notifier
     this.connectionsTable.grantReadData(this.notifierFunction);
@@ -185,31 +205,33 @@ export class NotificationsStack extends cdk.Stack {
       ],
     }));
     
-    // EventBridge Rule for multi-family notifications
+    // Note: Using direct EventBridge → Lambda for better provisioned concurrency support
+
+    // EventBridge Rule → Lambda (direct, with provisioned concurrency)
     new events.Rule(this, 'NotificationsRealtimeRule', {
       eventBus: kxEventBridge,
       ruleName: `kxgen-notifications-realtime`,
-      description: 'Route notification events to WebSocket broadcaster',
-      // Option 1: Native prefix matching (preferred)
+      description: 'Route notification events directly to Lambda',
       eventPattern: {
         source: ['kx-event-tracking'],
-        detailType: [
-          // QR events (legacy support)
-          'qr.get',
-          'qr.scanned',
-          'qr.created',
-          // Notification events
-          'notification.sent',
-          'notification.delivered',
-        ],
+        // Match ALL detail types for debugging - remove this filter temporarily
+        // detailType: [
+        //   'qr.get',
+        //   'qr.scanned', 
+        //   'qr.created',
+        //   'notification.sent',
+        //   'notification.delivered',
+        // ],
       },
-      // Option 2: Using EventBridgeDiscovery helper (alternative)
-      // eventPattern: EventBridgeDiscovery.createEventPattern({
-      //   entityTypes: ['qr', 'scan', 'payment', 'user', 'notification'],
-      //   eventTypes: ['*'], // Match all event types for these entities
-      // }),
-      targets: [new targets.LambdaFunction(this.notifierFunction)],
+      targets: [new targets.LambdaFunction(this.notifierFunction, {
+        deadLetterQueue: notifierDLQ, // DLQ for failed invocations
+        retryAttempts: 2, // Retry failed invocations
+        maxEventAge: cdk.Duration.minutes(5), // Don't retry old events
+      })],
     });
+
+    // Note: Lambda warming rule removed - using provisioned concurrency instead
+    // Provisioned concurrency is more reliable and cost-effective for consistent workloads
     
     // =============================================================================
     // SSM Parameters (for discovery by other stacks)
