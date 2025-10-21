@@ -71,8 +71,8 @@ export function createNotificationPayload(event: EventBridgeEvent<string, any>):
       priority = 'low';
       break;
     
-    case 'form.submitted':
-      title = '📝 Form Submitted';
+    case 'lead.created':
+      title = '📝 New Lead Created';
       content = `Form ${eventDetail.formName || eventDetail.formId || 'unknown'} was submitted`;
       priority = 'medium';
       break;

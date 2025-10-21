@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KxGen Chat + Notifications Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        .messages { height: 300px; overflow-y: auto; border: 1px solid #ccc; padding: 10px; margin: 10px 0; }
+        .message { margin: 5px 0; padding: 5px; }
+        .notification { background-color: #e7f3ff; }
+        .chat-message { background-color: #f0f8ff; }
+        .system-message { background-color: #f5f5f5; font-style: italic; }
+        input, button { margin: 5px; padding: 8px; }
+        .status { font-weight: bold; }
+        .connected { color: green; }
+        .disconnected { color: red; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>KxGen WebSocket Test: Notifications + Chat</h1>
+        
+        <div class="section">
+            <h3>Connection Status</h3>
+            <p>Status: <span id="status" class="status disconnected">Disconnected</span></p>
+            <input type="text" id="wsUrl" placeholder="wss://your-api-id.execute-api.region.amazonaws.com/prod" style="width: 400px;">
+            <button onclick="connect()">Connect</button>
+            <button onclick="disconnect()">Disconnect</button>
+        </div>
+
+        <div class="section">
+            <h3>Chat Controls</h3>
+            <div>
+                <input type="text" id="userId" placeholder="User ID" value="user123">
+                <input type="text" id="userName" placeholder="Display Name" value="Test User">
+                <input type="text" id="channelId" placeholder="Room ID" value="general">
+            </div>
+            <div>
+                <button onclick="joinRoom()">Join Room</button>
+                <button onclick="leaveRoom()">Leave Room</button>
+            </div>
+            <div>
+                <input type="text" id="messageText" placeholder="Type your message..." style="width: 300px;">
+                <button onclick="sendMessage()">Send Message</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <h3>Test Notifications</h3>
+            <p><em>Notifications will appear here when EventBridge events are received</em></p>
+            <button onclick="sendPing()">Send Ping (Test Connection)</button>
+        </div>
+
+        <div class="section">
+            <h3>Messages & Notifications</h3>
+            <div id="messages" class="messages"></div>
+            <button onclick="clearMessages()">Clear Messages</button>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+
+        function connect() {
+            const url = document.getElementById('wsUrl').value;
+            if (!url) {
+                alert('Please enter WebSocket URL');
+                return;
+            }
+
+            ws = new WebSocket(url);
+
+            ws.onopen = () => {
+                updateStatus('Connected', true);
+                addMessage('system', 'Connected to WebSocket');
+            };
+
+            ws.onclose = () => {
+                updateStatus('Disconnected', false);
+                addMessage('system', 'Disconnected from WebSocket');
+            };
+
+            ws.onerror = (error) => {
+                updateStatus('Error', false);
+                addMessage('system', `WebSocket error: ${error}`);
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const message = JSON.parse(event.data);
+                    handleMessage(message);
+                } catch (error) {
+                    addMessage('system', `Error parsing message: ${event.data}`);
+                }
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+
+        function updateStatus(status, connected) {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = status;
+            statusEl.className = connected ? 'status connected' : 'status disconnected';
+        }
+
+        function handleMessage(message) {
+            switch (message.type) {
+                case 'notification':
+                    addMessage('notification', `🔔 Notification: ${JSON.stringify(message, null, 2)}`);
+                    break;
+                
+                case 'chat.message':
+                    addMessage('chat', `💬 ${message.userName || message.userId}: ${message.message}`, message.timestamp);
+                    break;
+                
+                case 'chat.userJoined':
+                    addMessage('system', `✅ ${message.userName || message.userId} joined room: ${message.roomId}`, message.timestamp);
+                    break;
+                
+                case 'chat.userLeft':
+                    addMessage('system', `❌ ${message.userName || message.userId} left room: ${message.roomId}`, message.timestamp);
+                    break;
+                
+                case 'chat.joined':
+                    addMessage('system', `✅ ${message.message}`, message.timestamp);
+                    break;
+                
+                case 'chat.left':
+                    addMessage('system', `❌ ${message.message}`, message.timestamp);
+                    break;
+                
+                default:
+                    addMessage('system', `Unknown message: ${JSON.stringify(message, null, 2)}`);
+            }
+        }
+
+        function addMessage(type, content, timestamp) {
+            const messagesEl = document.getElementById('messages');
+            const messageEl = document.createElement('div');
+            messageEl.className = `message ${type === 'notification' ? 'notification' : type === 'chat' ? 'chat-message' : 'system-message'}`;
+            
+            const time = timestamp ? new Date(timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
+            messageEl.innerHTML = `<small>[${time}]</small> ${content}`;
+            
+            messagesEl.appendChild(messageEl);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+
+        function joinRoom() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                alert('Not connected to WebSocket');
+                return;
+            }
+
+            const userId = document.getElementById('userId').value;
+            const userName = document.getElementById('userName').value;
+            const roomId = document.getElementById('roomId').value;
+
+            if (!userId || !roomId) {
+                alert('Please enter User ID and Room ID');
+                return;
+            }
+
+            const message = {
+                type: 'chat.join',
+                channelId: roomId,
+                userId: userId,
+                userName: userName || userId
+            };
+
+            ws.send(JSON.stringify(message));
+            addMessage('system', `Attempting to join room: ${roomId}`);
+        }
+
+        function leaveRoom() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                alert('Not connected to WebSocket');
+                return;
+            }
+
+            const userId = document.getElementById('userId').value;
+            const roomId = document.getElementById('roomId').value;
+
+            if (!userId || !roomId) {
+                alert('Please enter User ID and Room ID');
+                return;
+            }
+
+            const message = {
+                type: 'chat.leave',
+                channelId: roomId,
+                userId: userId
+            };
+
+            ws.send(JSON.stringify(message));
+            addMessage('system', `Attempting to leave room: ${roomId}`);
+        }
+
+        function sendMessage() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                alert('Not connected to WebSocket');
+                return;
+            }
+
+            const userId = document.getElementById('userId').value;
+            const userName = document.getElementById('userName').value;
+            const roomId = document.getElementById('roomId').value;
+            const messageText = document.getElementById('messageText').value;
+
+            if (!userId || !roomId || !messageText) {
+                alert('Please enter User ID, Room ID, and Message');
+                return;
+            }
+
+            const message = {
+                type: 'chat.message',
+                channelId: roomId,
+                userId: userId,
+                userName: userName || userId,
+                message: messageText
+            };
+
+            ws.send(JSON.stringify(message));
+            document.getElementById('messageText').value = '';
+        }
+
+        function sendPing() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                alert('Not connected to WebSocket');
+                return;
+            }
+
+            const message = { type: 'ping' };
+            ws.send(JSON.stringify(message));
+            addMessage('system', 'Sent ping message');
+        }
+
+        function clearMessages() {
+            document.getElementById('messages').innerHTML = '';
+        }
+
+        // Allow Enter key to send messages
+        document.getElementById('messageText').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html>
+

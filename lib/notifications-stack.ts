@@ -30,16 +30,16 @@ export interface NotificationsStackProps extends cdk.StackProps {
 }
 
 /**
- * KxGen Notifications Stack
+ * KxGen Notifications & Chat Platform Stack
  * 
- * Provides real-time WebSocket notifications for EventBridge events.
- * When events fire (scans, payments, user actions, etc.), connected
- * clients receive instant notifications via WebSocket push.
+ * Provides real-time WebSocket notifications for EventBridge events
+ * AND full chat platform functionality with persistent message storage.
  * 
  * Architecture:
  * - EventBridge → Notifier Lambda → WebSocket API → Connected Clients
  * - DynamoDB tracks active WebSocket connections per tenant
- * - API Gateway WebSocket API handles connection lifecycle
+ * - DynamoDB stores chat rooms and messages (persistent, forever)
+ * - API Gateway WebSocket API handles connection lifecycle + chat
  * - Cross-account ready with assume role support
  */
 export class NotificationsStack extends cdk.Stack {
@@ -65,12 +65,33 @@ export class NotificationsStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY, // Use RETAIN for production
       pointInTimeRecovery: true,
     });
+
+    // Add Global Secondary Index for chat functionality
+    // Allows efficient lookup of connections by connectionId for chat operations
+    this.connectionsTable.addGlobalSecondaryIndex({
+      indexName: 'ConnectionIdIndex',
+      partitionKey: { name: 'connectionId', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL, // Include all attributes for chat room management
+    });
     
-    // Add tags to the table
+    // Note: Chat messages and rooms are stored in a separate stack
+    // This stack only handles real-time WebSocket connections and EventBridge publishing
+    // The other stack consumes EventBridge events for persistent storage
+    
+    // Add tags to connections table
     cdk.Tags.of(this.connectionsTable).add('App', 'KxGen');
-    cdk.Tags.of(this.connectionsTable).add('Scope', 'Realtime');
+    cdk.Tags.of(this.connectionsTable).add('Scope', 'Notifications');
     cdk.Tags.of(this.connectionsTable).add('Stack', 'Notifications');
     cdk.Tags.of(this.connectionsTable).add('Environment', env);
+    
+    // =============================================================================
+    // EventBridge Import (needed for Lambda environment variables)
+    // =============================================================================
+    
+    // Import EventBridge from KxGenStack
+    const kxEventBridge = EventBridgeDiscovery.importEventBridgeFromStack(
+      this, 'KxEventBridge', 'KxGenStack'
+    );
     
     // =============================================================================
     // WebSocket API Gateway
@@ -110,22 +131,30 @@ export class NotificationsStack extends cdk.Stack {
     const onMessageFunction = new NodejsFunction(this, 'OnMessageFunction', {
       entry: 'src/ws/on-message.ts',
       runtime: lambda.Runtime.NODEJS_18_X,
-      timeout: cdk.Duration.seconds(15),
-      memorySize: 256,
+      timeout: cdk.Duration.seconds(30), // Increased for chat operations
+      memorySize: 512, // Increased for chat processing
       bundling: {
         forceDockerBundling: false,
         externalModules: ['aws-sdk'],
       },
       environment: {
         CONNECTIONS_TABLE: this.connectionsTable.tableName,
+        EVENT_BUS_NAME: kxEventBridge.eventBusName,
         NODE_ENV: 'production',
       },
     });
     
-    // Grant DynamoDB permissions
+    // Grant DynamoDB permissions (connections table only)
     this.connectionsTable.grantWriteData(onConnectFunction);
     this.connectionsTable.grantWriteData(onDisconnectFunction);
-    this.connectionsTable.grantReadData(onMessageFunction);
+    this.connectionsTable.grantReadWriteData(onMessageFunction);
+    
+    // Grant EventBridge permissions to onMessage for publishing chat events
+    onMessageFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['events:PutEvents'],
+      resources: [kxEventBridge.eventBusArn],
+    }));
     
     // WebSocket API
     this.webSocketApi = new apigatewayv2.WebSocketApi(this, 'WebSocketApi', {
@@ -152,11 +181,6 @@ export class NotificationsStack extends cdk.Stack {
     // =============================================================================
     // EventBridge Integration
     // =============================================================================
-    
-    // Import EventBridge from KxGenStack
-    const kxEventBridge = EventBridgeDiscovery.importEventBridgeFromStack(
-      this, 'KxEventBridge', 'KxGenStack'
-    );
     
     // Create Dead Letter Queue for failed notifications
     const notifierDLQ = new sqs.Queue(this, 'NotifierDLQ', {
@@ -227,6 +251,55 @@ export class NotificationsStack extends cdk.Stack {
         deadLetterQueue: notifierDLQ, // DLQ for failed invocations
         retryAttempts: 2, // Retry failed invocations
         maxEventAge: cdk.Duration.minutes(5), // Don't retry old events
+      })],
+    });
+
+    // =============================================================================
+    // Chat Events Processing
+    // =============================================================================
+    
+    // Chat Event Consumer Lambda - for analytics, logging, and integrations
+    const chatEventConsumerFunction = new NodejsFunction(this, 'ChatEventConsumerFunction', {
+      entry: 'src/chat/chat-event-consumer.ts',
+      runtime: lambda.Runtime.NODEJS_18_X,
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 512,
+      bundling: {
+        forceDockerBundling: false,
+        externalModules: ['aws-sdk'],
+      },
+      environment: {
+        NODE_ENV: 'production',
+      },
+    });
+
+    // Dead Letter Queue for failed chat event processing
+    const chatEventDLQ = new sqs.Queue(this, 'ChatEventDLQ', {
+      queueName: `kxgen-${env}-chat-event-dlq`,
+      retentionPeriod: cdk.Duration.days(14),
+    });
+
+    // EventBridge Rule for Chat Events
+    new events.Rule(this, 'ChatEventsRule', {
+      eventBus: kxEventBridge,
+      ruleName: `kxgen-${env}-chat-events`,
+      description: 'Route chat events to consumer Lambda for analytics and processing',
+      eventPattern: {
+        source: ['kx-event-tracking'],
+        detailType: [
+          'chat.message',
+          'chat.join',
+          'chat.leave',
+          'chat.createRoom',
+          'chat.deleteRoom',
+          'chat.editMessage',
+          'chat.deleteMessage',
+        ],
+      },
+      targets: [new targets.LambdaFunction(chatEventConsumerFunction, {
+        deadLetterQueue: chatEventDLQ,
+        retryAttempts: 2,
+        maxEventAge: cdk.Duration.minutes(5),
       })],
     });
 

@@ -2,6 +2,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { ApiGatewayManagementApiClient } from '@aws-sdk/client-apigatewaymanagementapi';
 import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
+import { EventBridgeClient } from '@aws-sdk/client-eventbridge';
 
 // Environment variables
 const ASSUME_ROLE_ARN = process.env.ASSUME_ROLE_ARN;
@@ -10,6 +11,7 @@ const ASSUME_ROLE_ARN = process.env.ASSUME_ROLE_ARN;
 let dynamoClient: DynamoDBClient;
 let docClient: DynamoDBDocumentClient;
 let stsClient: STSClient;
+let eventBridgeClient: EventBridgeClient;
 let clientsInitialized = false;
 let initializationPromise: Promise<void> | null = null;
 
@@ -26,6 +28,9 @@ if (!ASSUME_ROLE_ARN) {
     marshallOptions: {
       removeUndefinedValues: true,
     },
+  });
+  eventBridgeClient = new EventBridgeClient({
+    maxAttempts: 3,
   });
   clientsInitialized = true;
 }
@@ -82,6 +87,10 @@ export async function initializeClients(): Promise<void> {
           removeUndefinedValues: true,
         },
       });
+      eventBridgeClient = new EventBridgeClient({
+        credentials,
+        maxAttempts: 3,
+      });
     }
 
     const endTime = Date.now();
@@ -130,6 +139,16 @@ export function getManagementClient(domainName: string, stage: string): ApiGatew
   }
   
   return managementClients.get(endpoint)!;
+}
+
+/**
+ * Get the EventBridge client
+ */
+export function getEventBridgeClient(): EventBridgeClient {
+  if (!eventBridgeClient) {
+    throw new Error('EventBridge client not initialized. Call initializeClients() first.');
+  }
+  return eventBridgeClient;
 }
 
 
