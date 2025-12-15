@@ -7,7 +7,7 @@ import { ConnectionRecord } from '../types/connection';
 import { NotificationPayload } from '../types/notification';
 
 // Utilities
-import { initializeClients, getDocClient, getManagementClient } from '../utils/aws-clients';
+import { initializeClients, getDocClient } from '../utils/aws-clients';
 import { filterConnectionsByEvent } from '../utils/connection-filter';
 import { withWarmup, isWarmupEvent } from '../utils/lambda-warmer';
 
@@ -145,6 +145,281 @@ async function processEventBridgeEvent(eventBridgeEvent: EventBridgeEvent<string
       }));
       return;
     }
+
+    // Extract detailType from event
+    const detailType = eventBridgeEvent['detail-type'];
+
+    // Handle chat.message.available events from fanout Lambda (kx-notifications-messaging)
+    // These events can be:
+    // 1. User messages → forward to LangChain Router (for agent processing)
+    // 2. Agent replies → broadcast to WebSocket clients (for UI display)
+    if (detailType === 'chat.message.available') {
+      const detail = eventBridgeEvent.detail || {};
+      const channelId = detail.channelId || detail.conversation_id;
+      const userId = detail.userId; // This is the recipient (bot persona ID for user messages, or user ID for agent replies)
+      const senderId = detail.senderId;
+      const senderType = detail.senderType || detail.metadata?.senderType;
+      const originMarker = detail.originMarker || detail.metadata?.originMarker;
+      const content = detail.content;
+      const messageId = detail.messageId || detail.originalMessageId;
+
+      if (!channelId) {
+        console.log(JSON.stringify({
+          level: 'WARN',
+          message: 'chat.message.available event missing channelId - skipping',
+          eventId: eventBridgeEvent.id,
+          tenantId,
+        }));
+        return;
+      }
+
+      // chat.message.available events are per-participant (fanout creates one per participant)
+      // userId = the participant who should receive this message
+      // We should send to that specific user's connection(s), not broadcast to channel
+      
+      if (!userId) {
+        console.log(JSON.stringify({
+          level: 'WARN',
+          message: 'chat.message.available event missing userId (recipient) - skipping',
+          eventId: eventBridgeEvent.id,
+          channelId,
+          tenantId,
+        }));
+        return;
+      }
+
+      if (!content) {
+        console.log(JSON.stringify({
+          level: 'WARN',
+          message: 'chat.message.available event missing content - skipping',
+          eventId: eventBridgeEvent.id,
+          channelId,
+          userId,
+          tenantId,
+        }));
+        return;
+      }
+
+      // Check if this is an agent reply (originMarker=persona or senderType=agent)
+      const isAgentReply = originMarker === 'persona' || senderType === 'agent';
+
+      const messagePayload = {
+        type: 'chat.message',
+        channelId, // Keep channelId in payload
+        userId: senderId, // The sender (who sent the message)
+        userName: detail.metadata?.userName || senderId || userId,
+        message: content,
+        timestamp: detail.timestamp || eventBridgeEvent.time || new Date().toISOString(),
+        messageId: messageId || eventBridgeEvent.id,
+        metadata: detail.metadata,
+      };
+
+      console.log(JSON.stringify({
+        level: 'INFO',
+        message: 'Sending chat.message.available to recipient',
+        eventId: eventBridgeEvent.id,
+        tenantId,
+        channelId,
+        recipientUserId: userId,
+        senderId,
+        messageId,
+        isAgentReply,
+      }));
+
+      // Find connection(s) for this specific userId and send the message
+      const docClient = getDocClient();
+      const connectionsResult = await docClient.send(new QueryCommand({
+        TableName: CONNECTIONS_TABLE,
+        KeyConditionExpression: 'tenantId = :tenantId',
+        FilterExpression: 'userId = :userId',
+        ExpressionAttributeValues: {
+          ':tenantId': tenantId,
+          ':userId': userId,
+        },
+      }));
+
+      const connections = connectionsResult.Items || [];
+      
+      if (connections.length === 0) {
+        console.log(JSON.stringify({
+          level: 'INFO',
+          message: 'No connections found for recipient userId',
+          eventId: eventBridgeEvent.id,
+          tenantId,
+          userId,
+          channelId,
+        }));
+        
+        // If agent reply, don't forward to Router
+        if (isAgentReply) {
+          return;
+        }
+        
+        // For user messages, Router will still process it via its own subscription
+        return;
+      }
+
+      // Send message to all connections for this userId (user might have multiple devices)
+      const sendPromises = connections.map(async (connection: ConnectionRecord) => {
+        try {
+          const managementClient = new ApiGatewayManagementApiClient({
+            endpoint: `https://${connection.domainName}/${connection.stage}`,
+          });
+          
+          await managementClient.send(new PostToConnectionCommand({
+            ConnectionId: connection.connectionId,
+            Data: JSON.stringify(messagePayload),
+          }));
+          
+          console.log(JSON.stringify({
+            level: 'INFO',
+            message: 'Sent message to connection',
+            connectionId: connection.connectionId,
+            userId,
+            channelId,
+          }));
+        } catch (error) {
+          if (error instanceof GoneException) {
+            console.log(JSON.stringify({
+              level: 'WARN',
+              message: 'Stale connection - removing',
+              connectionId: connection.connectionId,
+              userId,
+            }));
+            
+            await docClient.send(new DeleteCommand({
+              TableName: CONNECTIONS_TABLE,
+              Key: {
+                tenantId: connection.tenantId,
+                connectionId: connection.connectionId,
+              },
+            }));
+          } else {
+            console.log(JSON.stringify({
+              level: 'ERROR',
+              message: 'Failed to send message to connection',
+              connectionId: connection.connectionId,
+              userId,
+              error: error instanceof Error ? error.message : String(error),
+            }));
+          }
+        }
+      });
+
+      await Promise.allSettled(sendPromises);
+
+      console.log(JSON.stringify({
+        level: 'INFO',
+        message: 'Completed sending chat.message.available to recipient',
+        eventId: eventBridgeEvent.id,
+        tenantId,
+        userId,
+        channelId,
+        connectionsSent: connections.length,
+        isAgentReply,
+      }));
+
+      // Agent replies shouldn't trigger Router processing
+      if (isAgentReply) {
+        return;
+      }
+      
+      // User messages will be processed by Router via its own EventBridge subscription
+      return;
+    }
+
+    // Handle channel-based events (presence events from agent)
+    // NOTE: chat.message events from kx-event-tracking are already broadcast by onMessage handler
+    // We only handle chat.message from kxgen.agent (agent replies) and presence events
+    const source = eventBridgeEvent.source;
+    const isChannelBasedEvent = 
+      detailType === 'chat.received' ||
+      detailType === 'chat.read' ||
+      detailType === 'chat.typing' ||
+      detailType === 'chat.stoppedTyping' ||
+      (detailType === 'chat.message' && source === 'kxgen.agent'); // Only handle agent replies
+
+    if (isChannelBasedEvent) {
+      const detail = eventBridgeEvent.detail || {};
+      const channelId = detail.channelId || detail.conversation_id;
+
+      if (!channelId) {
+        console.log(JSON.stringify({
+          level: 'WARN',
+          message: `${detailType} event missing channelId - skipping broadcast`,
+          eventId: eventBridgeEvent.id,
+          tenantId,
+        }));
+        return;
+      }
+
+      // Build payload based on event type
+      let channelPayload: Record<string, any>;
+      
+      if (detailType === 'chat.message' && source === 'kxgen.agent') {
+        // Agent reply message
+        const { userId, userName, message, senderId, content, timestamp, text } = detail;
+        const messageBody = message ?? content ?? text;
+
+        if (!messageBody || !userId) {
+          console.log(JSON.stringify({
+            level: 'WARN',
+            message: 'chat.message event missing required fields - skipping broadcast',
+            eventId: eventBridgeEvent.id,
+            channelId,
+            userId,
+          }));
+          return;
+        }
+
+        channelPayload = {
+          type: 'chat.message',
+          channelId,
+          userId: senderId || userId,
+          userName: userName || senderId || userId,
+          message: messageBody,
+          timestamp: timestamp || eventBridgeEvent.time || new Date().toISOString(),
+          messageId: detail.messageId || eventBridgeEvent.id,
+        };
+
+        if (detail.metadata) {
+          channelPayload.metadata = detail.metadata;
+        }
+      } else {
+        // Presence events (chat.received, chat.read, chat.typing, chat.stoppedTyping)
+        channelPayload = {
+          type: detailType, // e.g., 'chat.typing', 'chat.read'
+          channelId,
+          tenantId,
+          timestamp: detail.timestamp || eventBridgeEvent.time || new Date().toISOString(),
+          ...(detail.currentChunk && { currentChunk: detail.currentChunk }),
+          ...(detail.totalChunks && { totalChunks: detail.totalChunks }),
+        };
+      }
+
+      console.log(JSON.stringify({
+        level: 'INFO',
+        message: `Broadcasting ${detailType} to channel via notifier`,
+        eventId: eventBridgeEvent.id,
+        tenantId,
+        channelId,
+        source,
+      }));
+
+      await broadcastToChatRoom(channelId, channelPayload);
+      return; // Early return - don't process as tenant-only event
+    }
+
+    // Skip chat.message events from kx-event-tracking (already broadcast by onMessage handler)
+    if (detailType === 'chat.message' && source === 'kx-event-tracking') {
+      console.log(JSON.stringify({
+        level: 'DEBUG',
+        message: 'Skipping chat.message from kx-event-tracking (already broadcast by onMessage handler)',
+        eventId: eventBridgeEvent.id,
+        tenantId,
+      }));
+      return;
+    }
     
     // Query active connections for this tenant
     const docClient = getDocClient();
@@ -223,14 +498,24 @@ async function processEventBridgeEvent(eventBridgeEvent: EventBridgeEvent<string
     }
     
     // Create notification payload
+    // Extract family from source - handle both kx-* and kxgen.* patterns
+    let family = eventBridgeEvent.source;
+    if (family.startsWith('kx-')) {
+      family = family.replace(/^kx-/, '').replace(/-/g, '_');
+    } else if (family.startsWith('kxgen.')) {
+      family = family.replace(/^kxgen\./, '').replace(/\./g, '_');
+    } else {
+      family = family.replace(/[-.]/g, '_');
+    }
+
     const payload: NotificationPayload = {
       type: 'notification',
-      family: eventBridgeEvent.source.replace(/^kx-/, '').replace(/-/g, '_'),
+      family,
       at: new Date().toISOString(),
       data: {
         eventId: eventBridgeEvent.id,
         tenantId: eventBridgeEvent.detail?.tenantId || 'unknown',
-        entityId: eventBridgeEvent.detail?.entityId || eventBridgeEvent.detail?.qrId || eventBridgeEvent.detail?.userId,
+        entityId: eventBridgeEvent.detail?.entityId || eventBridgeEvent.detail?.qrId || eventBridgeEvent.detail?.userId || eventBridgeEvent.detail?.channelId,
         entityType: eventBridgeEvent['detail-type'].split('.')[0],
         eventType: eventBridgeEvent['detail-type'],
         occurredAt: eventBridgeEvent.time,

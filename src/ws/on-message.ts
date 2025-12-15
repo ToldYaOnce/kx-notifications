@@ -167,7 +167,22 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
           userId: messageData.userId,
           messageLength: messageData.message?.length || 0,
         }));
-        await handleChatMessage(connectionId, messageData as ChatMessage, event.requestContext);
+        const messageResult = await handleChatMessage(connectionId, messageData as ChatMessage, event.requestContext);
+        if (!messageResult.success) {
+          console.log(JSON.stringify({
+            level: 'WARN',
+            message: 'Chat message rejected',
+            connectionId,
+            error: messageResult.error,
+            errorCode: messageResult.errorCode,
+          }));
+          // Send error response to client
+          await sendToConnection(connectionId, {
+            type: 'chat.error',
+            error: messageResult.error,
+            errorCode: messageResult.errorCode,
+          }, event.requestContext);
+        }
         break;
 
       case 'chat.leave':

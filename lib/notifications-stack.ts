@@ -232,25 +232,91 @@ export class NotificationsStack extends cdk.Stack {
     // Note: Using direct EventBridge → Lambda for better provisioned concurrency support
 
     // EventBridge Rule → Lambda (direct, with provisioned concurrency)
+    // Note: chat.message events are excluded - they're handled by ChatEventsRule and already broadcast by onMessage handler
     new events.Rule(this, 'NotificationsRealtimeRule', {
       eventBus: kxEventBridge,
       ruleName: `kxgen-notifications-realtime`,
-      description: 'Route notification events directly to Lambda',
+      description: 'Route notification events directly to Lambda (excludes chat.message)',
       eventPattern: {
         source: ['kx-event-tracking'],
-        // Match ALL detail types for debugging - remove this filter temporarily
-        // detailType: [
-        //   'qr.get',
-        //   'qr.scanned', 
-        //   'qr.created',
-        //   'notification.sent',
-        //   'notification.delivered',
-        // ],
+        detailType: [
+          // Exclude chat.message - it's handled by ChatEventsRule and already broadcast by onMessage handler
+          // QR Events
+          'qr.get',
+          'qr.scanned', 
+          'qr.created',
+          // Notification Events
+          'notification.sent',
+          'notification.delivered',
+          // Payment Events
+          'payment.completed',
+          'payment.failed',
+          // User Events
+          'user.login',
+          'user.logout',
+          // Add other notification event types as needed
+        ],
       },
       targets: [new targets.LambdaFunction(this.notifierFunction, {
         deadLetterQueue: notifierDLQ, // DLQ for failed invocations
         retryAttempts: 2, // Retry failed invocations
         maxEventAge: cdk.Duration.minutes(5), // Don't retry old events
+      })],
+    });
+
+    // EventBridge Rule for Agent Events (kxgen.agent source)
+    // Subscribes to all agent events for real-time notifications
+    new events.Rule(this, 'AgentEventsRule', {
+      eventBus: kxEventBridge,
+      ruleName: `kxgen-agent-events-notifications`,
+      description: 'Route agent events to Lambda for WebSocket notifications',
+      eventPattern: {
+        source: ['kxgen.agent'],
+        detailType: [
+          // Core Response Events
+          'agent.reply.created',
+          // Presence Events (channel-based)
+          'chat.received',
+          'chat.read',
+          'chat.typing',
+          'chat.stoppedTyping',
+          // Business Events
+          'lead.contact_captured',
+          'scheduling.booking_requested',
+          // Workflow Events
+          'agent.goal.activated',
+          'agent.goal.completed',
+          'agent.data.captured',
+          'agent.workflow.state_updated',
+          // Analytics Events
+          'agent.message.analyzed',
+          'agent.tonality.shifted',
+          'agent.interest.detected',
+          'agent.objection.detected',
+        ],
+      },
+      targets: [new targets.LambdaFunction(this.notifierFunction, {
+        deadLetterQueue: notifierDLQ,
+        retryAttempts: 2,
+        maxEventAge: cdk.Duration.minutes(5),
+      })],
+    });
+
+    // EventBridge Rule for chat.message.available events (from fanout Lambda)
+    // These events are per-participant and need to be broadcast to WebSocket clients
+    const chatMessageAvailableRule = new events.Rule(this, 'ChatMessageAvailableRule', {
+      eventBus: kxEventBridge,
+      ruleName: `kxgen-chat-message-available-notifications`,
+      description: 'Route chat.message.available events to notifier for WebSocket broadcasting - updated 2025-12-14',
+      eventPattern: {
+        source: ['kx-notifications-messaging'],
+        detailType: ['chat.message.available'],
+      },
+      enabled: true, // Explicitly enable the rule
+      targets: [new targets.LambdaFunction(this.notifierFunction, {
+        deadLetterQueue: notifierDLQ,
+        retryAttempts: 2,
+        maxEventAge: cdk.Duration.minutes(5),
       })],
     });
 
@@ -270,8 +336,16 @@ export class NotificationsStack extends cdk.Stack {
       },
       environment: {
         NODE_ENV: 'production',
+        EVENT_BUS_NAME: kxEventBridge.eventBusName,
       },
     });
+
+    // Grant EventBridge permissions to ChatEventConsumer for publishing to fanout
+    chatEventConsumerFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['events:PutEvents'],
+      resources: [kxEventBridge.eventBusArn],
+    }));
 
     // Dead Letter Queue for failed chat event processing
     const chatEventDLQ = new sqs.Queue(this, 'ChatEventDLQ', {

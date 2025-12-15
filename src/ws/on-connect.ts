@@ -84,6 +84,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     
     // Store connection in DynamoDB
     const ttl = Math.floor(Date.now() / 1000) + (24 * 60 * 60); // 24 hours TTL
+    const channels = event.queryStringParameters?.chatChannels?.split(',')?.filter(Boolean) ?? [];
+
     const connectionRecord: ConnectionRecord = {
       tenantId,
       connectionId,
@@ -92,6 +94,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       stage,
       ttl,
       connectedAt: new Date().toISOString(),
+      // Always initialize chatChannels as an empty array if not provided
+      // This ensures the attribute exists for DynamoDB filtering
+      chatChannels: channels.length > 0 ? channels : [],
       // Optional filtering metadata
       ...(userRole && { userRole }),
       ...(subscriptions && { subscriptions }),

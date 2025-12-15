@@ -1,4 +1,8 @@
 import { EventBridgeEvent } from 'aws-lambda';
+import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
+import { getEventBridgeClient } from '../utils/aws-clients';
+
+const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME!;
 
 /**
  * Chat Event Consumer Lambda
@@ -8,6 +12,7 @@ import { EventBridgeEvent } from 'aws-lambda';
  * - Audit logging
  * - External integrations (webhooks, notifications)
  * - Data pipelines
+ * - Publishing to kx-notifications EventBridge for fanout Lambda
  */
 
 export const handler = async (event: EventBridgeEvent<string, any>): Promise<void> => {
@@ -75,9 +80,12 @@ export const handler = async (event: EventBridgeEvent<string, any>): Promise<voi
 /**
  * Process chat message events
  * Use cases: Message analytics, content moderation, search indexing
+ * Also publishes to EventBridge for fanout Lambda (kx-notifications-messaging)
  */
 async function processChatMessage(event: EventBridgeEvent<string, any>): Promise<void> {
-  const { tenantId, roomId, userId, userName, message, messageId, timestamp } = event.detail;
+  const detail = event.detail;
+  const { tenantId, channelId, userId, userName, message, messageId, timestamp, connectionId, messageType, metadata } = detail;
+  const roomId = channelId || detail.roomId; // Support both channelId and roomId
   
   console.log(JSON.stringify({
     level: 'INFO',
@@ -98,6 +106,69 @@ async function processChatMessage(event: EventBridgeEvent<string, any>): Promise
       },
     },
   }));
+
+  // Publish to EventBridge for fanout Lambda (kx-notifications-messaging)
+  // The fanout Lambda will determine which bot participants should receive chat.message.available
+  try {
+    if (!EVENT_BUS_NAME) {
+      console.log(JSON.stringify({
+        level: 'ERROR',
+        message: 'EVENT_BUS_NAME environment variable not set - cannot publish channel message for fanout',
+        tenantId,
+        channelId,
+      }));
+      return; // Early return - can't proceed without event bus name
+    }
+
+    const eventBridgeClient = getEventBridgeClient();
+    
+    // Extract originMarker from metadata if present (to preserve agent message markers)
+    const originMarker = metadata?.originMarker || 
+                        (metadata?.isAgentGenerated === true ? 'persona' : undefined);
+    
+    await eventBridgeClient.send(new PutEventsCommand({
+      Entries: [{
+        Source: 'kx-notifications-messaging',
+        DetailType: 'channel.message', // Fanout Lambda subscribes to this detail type
+        Detail: JSON.stringify({
+          tenantId,
+          channelId: roomId || channelId,
+          messageId,
+          timestamp: timestamp || event.time || new Date().toISOString(),
+          metadata: {
+            ...metadata,
+            ...(originMarker && { originMarker }),
+            // Remove legacy flag if present
+            ...(metadata?.isAgentGenerated !== undefined && { isAgentGenerated: undefined }),
+          },
+          // Include all original message fields for fanout processing
+          content: message || detail.content,
+          senderId: userId,
+          senderType: metadata?.senderType || metadata?.userType || 'user',
+        }),
+        EventBusName: EVENT_BUS_NAME,
+        Time: new Date(timestamp || event.time),
+      }],
+    }));
+
+    console.log(JSON.stringify({
+      level: 'INFO',
+      message: 'Published channel message to EventBridge for fanout',
+      tenantId,
+      channelId: roomId || channelId,
+      messageId,
+      originMarker,
+    }));
+  } catch (error) {
+    console.log(JSON.stringify({
+      level: 'ERROR',
+      message: 'Failed to publish channel message to EventBridge for fanout',
+      tenantId,
+      channelId: roomId || channelId,
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    // Don't throw - analytics should continue even if fanout publish fails
+  }
 
   // TODO: Add custom processing logic here:
   // - Store in analytics database

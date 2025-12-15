@@ -1,8 +1,9 @@
 import { APIGatewayEventRequestContext } from 'aws-lambda';
-import { UpdateCommand, QueryCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb';
+import { UpdateCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { ApiGatewayManagementApiClient, PostToConnectionCommand } from '@aws-sdk/client-apigatewaymanagementapi';
 import { getDocClient } from '../utils/aws-clients';
 import { publishChatEvent, ChatMessageEventDetail, ChatRoomMembershipEventDetail } from '../utils/eventbridge-publisher';
+import { broadcastToChatRoom } from '../utils/chat-broadcast';
 
 const CONNECTIONS_TABLE = process.env.CONNECTIONS_TABLE!;
 
@@ -129,13 +130,13 @@ export async function handleChatJoin(
     } as any);
 
     // Notify other users in the room that someone joined
-    await broadcastToRoom(channelId, {
+    await broadcastToChatRoom(channelId, {
       type: 'chat.userJoined',
       channelId,
       userId,
       userName: userName || userId,
       timestamp: joinTimestamp,
-    }, connectionId); // Exclude the joining user
+    }, { excludeConnectionId: connectionId }); // Exclude the joining user
 
     // Send confirmation to the joining user
     if (domainName && stage) {
@@ -180,7 +181,7 @@ export async function handleChatMessage(
   connectionId: string,
   message: ChatMessage,
   requestContext: APIGatewayEventRequestContext
-): Promise<void> {
+): Promise<{ success: boolean; error?: string; errorCode?: string }> {
   const { channelId, userId, userName, message: chatMessage } = message;
   
   console.log(JSON.stringify({
@@ -211,28 +212,66 @@ export async function handleChatMessage(
         message: 'Connection not found for chat message',
         connectionId,
       }));
-      return;
+      return { success: false, error: 'Connection not found', errorCode: 'CONNECTION_NOT_FOUND' };
     }
 
     const connection = connectionResult.Items[0] as ConnectionRecord;
-    const userRooms = connection.chatChannels || [];
+    let userRooms = connection.chatChannels || [];
     const tenantId = connection.tenantId;
     
+    console.log(JSON.stringify({
+      level: 'DEBUG',
+      message: 'Connection state',
+      connectionId,
+      userId: connection.userId,
+      userName: connection.userName,
+      currentRooms: userRooms,
+      targetChannel: channelId,
+      isInRoom: userRooms.includes(channelId),
+    }));
+    
+    // Generate timestamp and messageId for EventBridge publish
+    const timestamp = new Date().toISOString();
+    const messageId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    
+    // Auto-join the user to the channel if they're not already in it
+    // This is a reasonable UX - if someone sends a message to a channel, they should be in it
     if (!userRooms.includes(channelId)) {
       console.log(JSON.stringify({
-        level: 'WARN',
-        message: 'User not in room - cannot send message',
+        level: 'INFO',
+        message: 'User not in room - auto-joining them to the channel',
         connectionId,
         channelId,
         userId,
       }));
-      return;
+      
+      // Add channelId to chatChannels array
+      userRooms = [...userRooms, channelId];
+      
+      // Update the connection record
+      const { UpdateCommand } = await import('@aws-sdk/lib-dynamodb');
+      await docClient.send(new UpdateCommand({
+        TableName: CONNECTIONS_TABLE,
+        Key: {
+          tenantId: connection.tenantId,
+          connectionId: connectionId,
+        },
+        UpdateExpression: 'SET chatChannels = :rooms',
+        ExpressionAttributeValues: {
+          ':rooms': userRooms,
+        },
+      }));
+      
+      console.log(JSON.stringify({
+        level: 'INFO',
+        message: 'User auto-joined to channel',
+        connectionId,
+        channelId,
+        updatedRooms: userRooms,
+      }));
     }
 
     // Publish chat message event to EventBridge (for persistent storage in other stack)
-    const timestamp = new Date().toISOString();
-    const messageId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    
     await publishChatEvent('chat.message', {
       tenantId,
       channelId,
@@ -256,7 +295,7 @@ export async function handleChatMessage(
       messageId,
     };
 
-    await broadcastToRoom(channelId, messagePayload);
+    await broadcastToChatRoom(channelId, messagePayload);
 
     console.log(JSON.stringify({
       level: 'INFO',
@@ -266,6 +305,8 @@ export async function handleChatMessage(
       userId,
       messageId,
     }));
+    
+    return { success: true };
 
   } catch (error) {
     console.log(JSON.stringify({
@@ -353,13 +394,13 @@ export async function handleChatLeave(
     } as any);
 
     // Notify other users in the room that someone left
-    await broadcastToRoom(channelId, {
+    await broadcastToChatRoom(channelId, {
       type: 'chat.userLeft',
       channelId,
       userId,
       userName: connection.userName || userId,
       timestamp: leaveTimestamp,
-    }, connectionId); // Exclude the leaving user
+    }, { excludeConnectionId: connectionId }); // Exclude the leaving user
 
     // Send confirmation to the leaving user
     if (domainName && stage) {
@@ -390,101 +431,6 @@ export async function handleChatLeave(
       connectionId,
       channelId,
       userId,
-      error: error instanceof Error ? error.message : String(error),
-    }));
-    throw error;
-  }
-}
-
-/**
- * Broadcast a message to all users in a chat room
- */
-async function broadcastToRoom(
-  channelId: string,
-  messagePayload: any,
-  excludeConnectionId?: string
-): Promise<void> {
-  try {
-    const docClient = await getDocClient();
-    
-    // Get all connections in this room
-    const { ScanCommand } = await import('@aws-sdk/lib-dynamodb');
-    
-    const scanResult = await docClient.send(new ScanCommand({
-      TableName: CONNECTIONS_TABLE,
-      FilterExpression: 'contains(chatChannels, :channelId)',
-      ExpressionAttributeValues: {
-        ':channelId': channelId,
-      },
-    }));
-
-    if (!scanResult.Items || scanResult.Items.length === 0) {
-      console.log(JSON.stringify({
-        level: 'DEBUG',
-        message: 'No connections found in room',
-        channelId,
-      }));
-      return;
-    }
-
-    // Filter out the excluded connection
-    const roomConnections = scanResult.Items.filter((connection: any) => 
-      connection.connectionId !== excludeConnectionId
-    );
-
-    console.log(JSON.stringify({
-      level: 'DEBUG',
-      message: 'Broadcasting to room connections',
-      channelId,
-      connectionCount: roomConnections.length,
-      excludeConnectionId,
-    }));
-
-    // Send message to each connection in the room
-    const sendPromises = roomConnections.map(async (connection: any) => {
-      try {
-        const apiGw = getApiGwClient(connection.domainName, connection.stage);
-        await apiGw.send(new PostToConnectionCommand({
-          ConnectionId: connection.connectionId,
-          Data: JSON.stringify(messagePayload),
-        }));
-      } catch (error) {
-        // Handle stale connections
-        if (error instanceof Error && error.name === 'GoneException') {
-          console.log(JSON.stringify({
-            level: 'WARN',
-            message: 'Stale connection detected - removing from database',
-            connectionId: connection.connectionId,
-            channelId,
-          }));
-          
-          // Remove stale connection
-          await docClient.send(new DeleteCommand({
-            TableName: CONNECTIONS_TABLE,
-            Key: {
-              tenantId: connection.tenantId,
-              connectionId: connection.connectionId,
-            },
-          }));
-        } else {
-          console.log(JSON.stringify({
-            level: 'ERROR',
-            message: 'Error sending message to connection',
-            connectionId: connection.connectionId,
-            channelId,
-            error: error instanceof Error ? error.message : String(error),
-          }));
-        }
-      }
-    });
-
-    await Promise.allSettled(sendPromises);
-
-  } catch (error) {
-    console.log(JSON.stringify({
-      level: 'ERROR',
-      message: 'Error broadcasting to room',
-      channelId,
       error: error instanceof Error ? error.message : String(error),
     }));
     throw error;

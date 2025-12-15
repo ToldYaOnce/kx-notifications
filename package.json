@@ -26,13 +26,14 @@
     "typescript": "~5.2.2"
   },
   "dependencies": {
-    "@toldyaonce/kx-event-consumers": "^1.0.0",
-    "aws-cdk-lib": "^2.100.0",
-    "constructs": "^10.3.0",
-    "@aws-sdk/client-dynamodb": "^3.400.0",
-    "@aws-sdk/lib-dynamodb": "^3.400.0",
     "@aws-sdk/client-apigatewaymanagementapi": "^3.400.0",
-    "@aws-sdk/client-sts": "^3.400.0"
+    "@aws-sdk/client-dynamodb": "^3.400.0",
+    "@aws-sdk/client-sts": "^3.400.0",
+    "@aws-sdk/lib-dynamodb": "^3.400.0",
+    "@toldyaonce/kx-event-consumers": "^1.0.0",
+    "@toldyaonce/kx-langchain-agent-iac": "1.0.61",
+    "aws-cdk-lib": "^2.100.0",
+    "constructs": "^10.3.0"
   },
   "keywords": [
     "aws",
