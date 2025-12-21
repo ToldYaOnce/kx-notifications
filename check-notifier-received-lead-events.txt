@@ -1,0 +1,16 @@
+-- Check if the notifier received and forwarded lead.contact_captured events
+-- Run this in the NOTIFIER Lambda log group
+
+fields @timestamp, @message
+| parse @message '"detailType":"*"' as detailType
+| parse @message '"eventId":"*"' as eventId
+| parse @message '"tenantId":"*"' as tenantId
+| parse @message '"originalConnectionCount":*' as originalConnectionCount
+| parse @message '"filteredConnectionCount":*' as filteredConnectionCount
+| parse @message '"successfulSends":*' as totalSent
+| filter @timestamp > date_sub(now(), 24h)
+| filter @message like /lead.contact_captured/ or detailType = "lead.contact_captured"
+| sort @timestamp desc
+| limit 100
+
+

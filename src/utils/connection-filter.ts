@@ -50,25 +50,40 @@ export function filterConnectionsByEvent(connections: ConnectionRecord[], event:
   }
   
   // Example 5: Filter by subscription preferences
+  // NOTE: Agent events (from kxgen.agent source) bypass subscription filtering
+  // These are important business events that should reach all connections
   const eventFamily = extractEventFamily(event['detail-type']);
-  const subscribedConnections = connections.filter(conn => {
-    // If no subscriptions specified, assume they want all notifications
-    if (!conn.subscriptions || conn.subscriptions.length === 0) {
-      return true;
-    }
-    // Check if user subscribed to this event family
-    return conn.subscriptions.includes(eventFamily);
-  });
+  const isAgentEvent = event.source === 'kxgen.agent';
   
-  if (subscribedConnections.length < connections.length) {
+  if (!isAgentEvent) {
+    // Only apply subscription filtering to non-agent events
+    const subscribedConnections = connections.filter(conn => {
+      // If no subscriptions specified, assume they want all notifications
+      if (!conn.subscriptions || conn.subscriptions.length === 0) {
+        return true;
+      }
+      // Check if user subscribed to this event family
+      return conn.subscriptions.includes(eventFamily);
+    });
+    
+    if (subscribedConnections.length < connections.length) {
+      console.log(JSON.stringify({
+        level: 'INFO',
+        message: 'Filtered connections by subscription preferences',
+        eventFamily,
+        originalCount: connections.length,
+        subscribedCount: subscribedConnections.length,
+      }));
+      return subscribedConnections;
+    }
+  } else {
     console.log(JSON.stringify({
-      level: 'INFO',
-      message: 'Filtered connections by subscription preferences',
+      level: 'DEBUG',
+      message: 'Agent event - bypassing subscription filtering',
       eventFamily,
-      originalCount: connections.length,
-      subscribedCount: subscribedConnections.length,
+      detailType: event['detail-type'],
+      connectionCount: connections.length,
     }));
-    return subscribedConnections;
   }
   
   // Example 4: Filter by specific entity ownership

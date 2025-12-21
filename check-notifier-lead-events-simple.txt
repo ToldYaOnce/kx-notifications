@@ -1,0 +1,10 @@
+-- Simple check: Did notifier receive lead.contact_captured?
+-- Run this in the NOTIFIER Lambda log group
+
+fields @timestamp, @message
+| filter @timestamp > date_sub(now(), 24h)
+| filter @message like /lead.contact_captured/ or @message like /"detailType":"lead.contact_captured"/
+| sort @timestamp desc
+| limit 50
+
+

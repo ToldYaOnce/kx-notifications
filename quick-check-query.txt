@@ -1,0 +1,14 @@
+-- Quick check: Are agent events being received and processed?
+-- Use this in CloudWatch Logs Insights
+
+fields @timestamp, @message
+| parse @message '"detailType":"*"' as detailType
+| parse @message '"eventId":"*"' as eventId
+| parse @message '"tenantId":"*"' as tenantId
+| parse @message '"originalConnectionCount":*' as originalConnectionCount
+| parse @message '"filteredConnectionCount":*' as filteredConnectionCount
+| parse @message '"successfulSends":*' as totalSent
+| filter @timestamp > date_sub(now(), 1h)
+| filter @message like /Processing agent event/ or @message like /"detailType":"scheduling\.booking_requested"/ or @message like /"detailType":"lead\.contact_captured"/ or @message like /"detailType":"agent\./
+| sort @timestamp desc
+| limit 100

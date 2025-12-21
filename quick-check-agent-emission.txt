@@ -1,0 +1,14 @@
+-- Quick check: Are lead.contact_captured and scheduling.booking_requested events being emitted?
+-- Run this in the AGENT Lambda log group (not the notifier log group)
+
+fields @timestamp, @message
+| parse @message '"detail-type":"*"' as detailType
+| parse @message '"source":"*"' as source
+| parse @message '"id":"*"' as eventId
+| filter @timestamp > date_sub(now(), 24h)
+| filter source = "kxgen.agent"
+| filter detailType in ["lead.contact_captured", "scheduling.booking_requested"]
+| stats count() as eventCount by detailType
+| sort eventCount desc
+
+

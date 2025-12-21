@@ -1,0 +1,72 @@
+-- Query 1: Show agent events with their full payloads (last 1 hour)
+-- This shows the complete event detail for each agent event
+
+fields @timestamp, detailType, eventId, tenantId, payload
+| parse @message '"detailType":"*"' as detailType
+| parse @message '"eventId":"*"' as eventId
+| parse @message '"tenantId":"*"' as tenantId
+| parse @message '"payload":{*}' as payload
+| filter @timestamp > date_sub(now(), 1h)
+| filter @message like /Processing agent event/
+| sort @timestamp desc
+| limit 100
+
+---
+
+-- Query 2: Show specific agent event types with payloads
+-- Replace the detailType filter with the event you want to see
+
+fields @timestamp, detailType, eventId, tenantId, payload
+| parse @message '"detailType":"*"' as detailType
+| parse @message '"eventId":"*"' as eventId
+| parse @message '"tenantId":"*"' as tenantId
+| parse @message '"payload":{*}' as payload
+| filter @timestamp > date_sub(now(), 24h)
+| filter @message like /Processing agent event/
+| filter detailType = "agent.tonality.shifted"
+| sort @timestamp desc
+| limit 50
+
+---
+
+-- Query 3: Show all agent events with payloads (full message view)
+-- Use this to see the complete log message including all fields
+
+fields @timestamp, @message
+| filter @timestamp > date_sub(now(), 1h)
+| filter @message like /Processing agent event/ and @message like /"payload":/
+| sort @timestamp desc
+| limit 50
+
+---
+
+-- Query 4: Extract specific payload fields for agent.tonality.shifted
+-- Shows shift data, conversation averages, etc.
+
+fields @timestamp, detailType, eventId, tenantId
+| parse @message '"detailType":"*"' as detailType
+| parse @message '"eventId":"*"' as eventId
+| parse @message '"tenantId":"*"' as tenantId
+| filter @timestamp > date_sub(now(), 24h)
+| filter @message like /Processing agent event/ and @message like /agent\.tonality\.shifted/
+| parse @message /"shift":{([^}]+)}/ as shiftData
+| parse @message /"conversationAverages":{([^}]+)}/ as conversationAverages
+| sort @timestamp desc
+| limit 50
+
+---
+
+-- Query 5: Extract payload fields for lead.created events
+-- Shows lead data, contact info, captured data, etc.
+
+fields @timestamp, detailType, eventId, tenantId
+| parse @message '"detailType":"*"' as detailType
+| parse @message '"eventId":"*"' as eventId
+| parse @message '"tenantId":"*"' as tenantId
+| filter @timestamp > date_sub(now(), 24h)
+| filter @message like /Processing agent event/ and @message like /lead\.created/
+| parse @message /"leadId":"([^"]+)"/ as leadId
+| parse @message /"source":"([^"]+)"/ as leadSource
+| sort @timestamp desc
+| limit 50
+

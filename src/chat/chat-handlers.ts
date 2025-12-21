@@ -271,7 +271,9 @@ export async function handleChatMessage(
       }));
     }
 
-    // Publish chat message event to EventBridge (for persistent storage in other stack)
+    // Publish chat message event to EventBridge
+    // The event will flow through: ChatEventConsumer → Fanout → Notifier → WebSocket clients
+    // This ensures a single source of truth and prevents duplicates
     await publishChatEvent('chat.message', {
       tenantId,
       channelId,
@@ -284,22 +286,9 @@ export async function handleChatMessage(
       messageType: 'text',
     } as any);
 
-    // Broadcast message to all users in the room (real-time)
-    const messagePayload = {
-      type: 'chat.message',
-      channelId,
-      userId,
-      userName: userName || userId,
-      message: chatMessage,
-      timestamp,
-      messageId,
-    };
-
-    await broadcastToChatRoom(channelId, messagePayload);
-
     console.log(JSON.stringify({
       level: 'INFO',
-      message: 'Chat message broadcasted successfully',
+      message: 'Chat message published to EventBridge - will be broadcast via notifier',
       connectionId,
       channelId,
       userId,

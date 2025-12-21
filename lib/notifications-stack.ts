@@ -245,6 +245,11 @@ export class NotificationsStack extends cdk.Stack {
           'qr.get',
           'qr.scanned', 
           'qr.created',
+          // Lead Events
+          'lead.created',
+          // Form Events
+          'form.loaded',
+          'form.submitted',
           // Notification Events
           'notification.sent',
           'notification.delivered',
@@ -273,15 +278,13 @@ export class NotificationsStack extends cdk.Stack {
       eventPattern: {
         source: ['kxgen.agent'],
         detailType: [
-          // Core Response Events
-          'agent.reply.created',
           // Presence Events (channel-based)
           'chat.received',
           'chat.read',
           'chat.typing',
           'chat.stoppedTyping',
           // Business Events
-          'lead.contact_captured',
+          'lead.created',
           'scheduling.booking_requested',
           // Workflow Events
           'agent.goal.activated',
@@ -302,17 +305,36 @@ export class NotificationsStack extends cdk.Stack {
       })],
     });
 
-    // EventBridge Rule for chat.message.available events (from fanout Lambda)
-    // These events are per-participant and need to be broadcast to WebSocket clients
-    const chatMessageAvailableRule = new events.Rule(this, 'ChatMessageAvailableRule', {
+    // EventBridge Rule for Scheduler Events (kx.scheduler source)
+    // Subscribes to appointment scheduling events for real-time notifications
+    new events.Rule(this, 'SchedulerEventsRule', {
       eventBus: kxEventBridge,
-      ruleName: `kxgen-chat-message-available-notifications`,
-      description: 'Route chat.message.available events to notifier for WebSocket broadcasting - updated 2025-12-14',
+      ruleName: `kxgen-scheduler-events-notifications`,
+      description: 'Route scheduler events to Lambda for WebSocket notifications',
+      eventPattern: {
+        source: ['kx.scheduler'],
+        detailType: [
+          'appointment.scheduled',
+        ],
+      },
+      targets: [new targets.LambdaFunction(this.notifierFunction, {
+        deadLetterQueue: notifierDLQ,
+        retryAttempts: 2,
+        maxEventAge: cdk.Duration.minutes(5),
+      })],
+    });
+
+    // EventBridge Rule for chat.message.received events (from fanout Lambda)
+    // These events are per-participant and need to be broadcast to WebSocket clients
+    const chatMessageReceivedRule = new events.Rule(this, 'ChatMessageReceivedRule', {
+      eventBus: kxEventBridge,
+      ruleName: `kxgen-chat-message-received-notifications`,
+      description: 'Route chat.message.received events to notifier for WebSocket broadcasting',
       eventPattern: {
         source: ['kx-notifications-messaging'],
-        detailType: ['chat.message.available'],
+        detailType: ['chat.message.received'],
       },
-      enabled: true, // Explicitly enable the rule
+      enabled: true,
       targets: [new targets.LambdaFunction(this.notifierFunction, {
         deadLetterQueue: notifierDLQ,
         retryAttempts: 2,

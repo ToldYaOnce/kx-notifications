@@ -1,0 +1,78 @@
+-- Debug query 1: Check if agent.tonality.shifted events are being received by the notifier
+
+fields @timestamp, @message
+| parse @message '"detailType":"*"' as detailType
+| parse @message '"eventId":"*"' as eventId
+| parse @message '"tenantId":"*"' as tenantId
+| filter @timestamp > date_sub(now(), 24h)
+| filter @message like /agent\.tonality\.shifted/
+| sort @timestamp desc
+| limit 50
+
+---
+
+-- Debug query 2: Check connection querying for tonality events
+
+fields @timestamp, @message
+| parse @message '"detailType":"*"' as detailType
+| parse @message '"connectionCount":*' as connectionCount
+| parse @message '"eventId":"*"' as eventId
+| filter @timestamp > date_sub(now(), 24h)
+| filter @message like /Found connections for tenant/ and @message like /agent\.tonality\.shifted/
+| sort @timestamp desc
+| limit 50
+
+---
+
+-- Debug query 3: Check connection filtering results for tonality events
+
+fields @timestamp, @message
+| parse @message '"detailType":"*"' as detailType
+| parse @message '"originalConnectionCount":*' as originalConnectionCount
+| parse @message '"filteredConnectionCount":*' as filteredConnectionCount
+| parse @message '"eventId":"*"' as eventId
+| filter @timestamp > date_sub(now(), 24h)
+| filter @message like /Connection filtering results/ and @message like /agent\.tonality\.shifted/
+| sort @timestamp desc
+| limit 50
+
+---
+
+-- Debug query 4: Check if tonality events are being sent to connections
+
+fields @timestamp, @message
+| parse @message '"detailType":"*"' as detailType
+| parse @message '"successfulSends":*' as successfulSends
+| parse @message '"failedSends":*' as failedSends
+| parse @message '"eventId":"*"' as eventId
+| parse @message '"notificationFamily":"*"' as notificationFamily
+| filter @timestamp > date_sub(now(), 24h)
+| filter @message like /Lambda handler execution completed successfully/
+| filter @message like /agent\.tonality\.shifted/ or notificationFamily = "agent"
+| sort @timestamp desc
+| limit 50
+
+---
+
+-- Debug query 5: Check for warnings (events filtered out)
+
+fields @timestamp, @message
+| parse @message '"detailType":"*"' as detailType
+| parse @message '"eventId":"*"' as eventId
+| parse @message '"originalConnectionCount":*' as originalConnectionCount
+| filter @timestamp > date_sub(now(), 24h)
+| filter @message like /No connections match event conditions/
+| filter @message like /agent\.tonality\.shifted/
+| sort @timestamp desc
+| limit 50
+
+---
+
+-- Debug query 6: Full flow trace for a specific tonality event
+-- Replace the eventId with an actual eventId from query 1
+
+fields @timestamp, @message
+| filter @timestamp > date_sub(now(), 24h)
+| filter @message like /"eventId":"YOUR_EVENT_ID_HERE"/
+| sort @timestamp asc
+

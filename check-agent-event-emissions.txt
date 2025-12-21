@@ -1,0 +1,53 @@
+-- Check all agent-related event emissions
+-- Query 1: Summary count by event type (last 24 hours)
+
+fields @timestamp, @message
+| parse @message '"detailType":"*"' as detailType
+| parse @message '"eventId":"*"' as eventId  
+| parse @message '"tenantId":"*"' as tenantId
+| parse @message '"source":"*"' as source
+| filter @timestamp > date_sub(now(), 24h)
+| filter source = "kxgen.agent" or @message like /"detailType":"agent\./ or @message like /"detailType":"scheduling\./ or @message like /"detailType":"lead\./
+| stats count() as eventCount by detailType
+| sort eventCount desc
+
+---
+
+-- Query 2: Detailed view of individual events (last 1 hour)
+
+fields @timestamp, detailType, eventId, tenantId, source
+| parse @message '"detailType":"*"' as detailType
+| parse @message '"eventId":"*"' as eventId  
+| parse @message '"tenantId":"*"' as tenantId
+| parse @message '"source":"*"' as source
+| filter @timestamp > date_sub(now(), 1h)
+| filter @message like /Processing agent event/ or source = "kxgen.agent"
+| sort @timestamp desc
+| limit 100
+
+---
+
+-- Query 3: Check for all agent event types we subscribe to
+
+fields @timestamp, @message
+| parse @message '"detailType":"*"' as detailType
+| parse @message '"eventId":"*"' as eventId
+| parse @message '"tenantId":"*"' as tenantId
+| filter @timestamp > date_sub(now(), 24h)
+| filter @message like /Processing agent event/
+| filter detailType in [
+  "scheduling.booking_requested",
+  "lead.created",
+  "agent.goal.activated",
+  "agent.goal.completed",
+  "agent.data.captured",
+  "agent.workflow.state_updated",
+  "agent.message.analyzed",
+  "agent.tonality.shifted",
+  "agent.interest.detected",
+  "agent.objection.detected",
+  "agent.reply.created"
+]
+| stats count() as eventCount by detailType
+| sort eventCount desc
+
